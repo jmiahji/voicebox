@@ -153,6 +153,7 @@ class ChatterboxTurboTTSBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio using Chatterbox Turbo TTS.
@@ -165,10 +166,15 @@ class ChatterboxTurboTTSBackend:
             language: Ignored (Turbo is English-only)
             seed: Random seed for reproducibility
             instruct: Unused (protocol compatibility)
+            params: Optional overrides — temperature, top_k, top_p,
+                repetition_penalty, min_p (exaggeration/CFG are unsupported
+                by Turbo upstream and deliberately not in the spec)
 
         Returns:
             Tuple of (audio_array, sample_rate)
         """
+        from . import clamp_params
+
         await self.load_model()
 
         ref_audio = voice_prompt.get("ref_audio")
@@ -176,21 +182,35 @@ class ChatterboxTurboTTSBackend:
             logger.warning(f"Reference audio not found: {ref_audio}")
             ref_audio = None
 
+        gen_opts = clamp_params(
+            params,
+            {
+                "temperature": (0.05, 2.0, float),
+                "top_k": (1, 5000, int),
+                "top_p": (0.1, 1.0, float),
+                "repetition_penalty": (1.0, 3.0, float),
+                "min_p": (0.0, 1.0, float),
+            },
+            base={
+                "temperature": 0.8,
+                "top_k": 1000,
+                "top_p": 0.95,
+                "repetition_penalty": 1.2,
+            },
+        )
+
         def _generate_sync():
             import torch
 
             if seed is not None:
                 manual_seed(seed, self._device)
 
-            logger.info("[Chatterbox Turbo] Generating (English)")
+            logger.info(f"[Chatterbox Turbo] Generating (English) opts={gen_opts}")
 
             wav = self.model.generate(
                 text,
                 audio_prompt_path=ref_audio,
-                temperature=0.8,
-                top_k=1000,
-                top_p=0.95,
-                repetition_penalty=1.2,
+                **gen_opts,
             )
 
             # Convert tensor -> numpy

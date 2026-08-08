@@ -3,7 +3,7 @@ Pydantic models for request/response validation.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from .utils.capture_chords import (
@@ -85,7 +85,7 @@ class GenerationRequest(BaseModel):
     seed: Optional[int] = Field(None, ge=0)
     model_size: Optional[str] = Field(default="1.7B", pattern="^(1\\.7B|0\\.6B|1B|3B)$")
     instruct: Optional[str] = Field(None, max_length=500)
-    engine: Optional[str] = Field(default="qwen", pattern="^(qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$")
+    engine: Optional[str] = Field(default="qwen", pattern="^(qwen|qwen_custom_voice|qwen_voice_design|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$")
     personality: bool = Field(
         default=False,
         description="When true and the profile has a personality prompt, the input text is rewritten in-character before TTS.",
@@ -99,6 +99,23 @@ class GenerationRequest(BaseModel):
     normalize: bool = Field(default=True, description="Normalize output audio volume")
     effects_chain: Optional[List["EffectConfig"]] = Field(
         None, description="Effects chain to apply after generation (overrides profile default)"
+    )
+    params: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Per-engine expressiveness/sampling overrides (e.g. Chatterbox "
+            "exaggeration/cfg_weight, temperature, Kokoro speed, TADA "
+            "candidates). Backends sanitize, clamp, and ignore unknown keys."
+        ),
+    )
+    verify: bool = Field(
+        default=False,
+        description=(
+            "ASR round-trip verification: transcribe each generated chunk "
+            "with the in-process Whisper, retry on word-error-rate failures "
+            "(new seed, up to 2 retries), keep the best take. Requires a "
+            "cached Whisper model; silently unavailable otherwise."
+        ),
     )
 
 
@@ -317,7 +334,7 @@ class MCPClientBindingResponse(BaseModel):
     profile_id: Optional[str] = None
     default_engine: Optional[str] = Field(
         None,
-        pattern="^(qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$",
+        pattern="^(qwen|qwen_custom_voice|qwen_voice_design|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$",
     )
     default_personality: bool = False
     last_seen_at: Optional[datetime] = None
@@ -336,7 +353,7 @@ class MCPClientBindingUpsert(BaseModel):
     profile_id: Optional[str] = None
     default_engine: Optional[str] = Field(
         None,
-        pattern="^(qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$",
+        pattern="^(qwen|qwen_custom_voice|qwen_voice_design|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$",
     )
     default_personality: bool = False
 
@@ -355,7 +372,7 @@ class SpeakRequest(BaseModel):
     )
     engine: Optional[str] = Field(
         None,
-        pattern="^(qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$",
+        pattern="^(qwen|qwen_custom_voice|qwen_voice_design|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$",
     )
     personality: Optional[bool] = Field(
         None,

@@ -166,6 +166,15 @@ class MLXTTSBackend:
     async def combine_voice_prompts(self, audio_paths, reference_texts):
         return await _combine_voice_prompts(audio_paths, reference_texts)
 
+    # Caller-overridable sampling params forwarded to mlx-audio generate().
+    _PARAM_SPEC = {
+        "temperature": (0.05, 2.0, float),
+        "top_k": (1, 500, int),
+        "top_p": (0.1, 1.0, float),
+        "repetition_penalty": (1.0, 3.0, float),
+        "max_tokens": (256, 8192, int),
+    }
+
     async def generate(
         self,
         text: str,
@@ -173,6 +182,7 @@ class MLXTTSBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio from text using voice prompt.
@@ -183,11 +193,17 @@ class MLXTTSBackend:
             language: Language code (en or zh) - may not be fully supported by MLX
             seed: Random seed for reproducibility
             instruct: Natural language instruction (may not be supported by MLX)
+            params: Optional sampling overrides (temperature, top_k, top_p,
+                repetition_penalty, max_tokens)
 
         Returns:
             Tuple of (audio_array, sample_rate)
         """
         await self.load_model_async(None)
+
+        from . import clamp_params
+
+        gen_kw = clamp_params(params, self._PARAM_SPEC)
 
         logger.info("Generating audio for text: %s", text)
 
@@ -229,23 +245,23 @@ class MLXTTSBackend:
                     sig = inspect.signature(self.model.generate)
                     if "ref_audio" in sig.parameters:
                         # Generate with voice cloning
-                        for result in self.model.generate(text, ref_audio=ref_audio, ref_text=ref_text, lang_code=lang):
+                        for result in self.model.generate(text, ref_audio=ref_audio, ref_text=ref_text, lang_code=lang, **gen_kw):
                             audio_chunks.append(np.array(result.audio))
                             sample_rate = result.sample_rate
                     else:
                         # Fallback: generate without voice cloning
-                        for result in self.model.generate(text, lang_code=lang):
+                        for result in self.model.generate(text, lang_code=lang, **gen_kw):
                             audio_chunks.append(np.array(result.audio))
                             sample_rate = result.sample_rate
                 else:
                     # No voice prompt, generate normally
-                    for result in self.model.generate(text, lang_code=lang):
+                    for result in self.model.generate(text, lang_code=lang, **gen_kw):
                         audio_chunks.append(np.array(result.audio))
                         sample_rate = result.sample_rate
             except Exception as e:
                 # If voice cloning fails, try without it
                 logger.warning("Voice cloning failed, generating without voice prompt: %s", e)
-                for result in self.model.generate(text, lang_code=lang):
+                for result in self.model.generate(text, lang_code=lang, **gen_kw):
                     audio_chunks.append(np.array(result.audio))
                     sample_rate = result.sample_rate
 

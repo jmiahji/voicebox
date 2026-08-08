@@ -164,6 +164,16 @@ class ChatterboxTTSBackend:
         "repetition_penalty": 2.0,
     }
 
+    # Caller-overridable generation params, clamped to safe ranges.
+    _PARAM_SPEC: ClassVar[dict] = {
+        "exaggeration": (0.0, 1.0, float),
+        "cfg_weight": (0.0, 1.0, float),
+        "temperature": (0.05, 2.0, float),
+        "repetition_penalty": (1.0, 3.0, float),
+        "min_p": (0.0, 1.0, float),
+        "top_p": (0.1, 1.0, float),
+    }
+
     async def generate(
         self,
         text: str,
@@ -171,6 +181,7 @@ class ChatterboxTTSBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio using Chatterbox Multilingual TTS.
@@ -181,10 +192,14 @@ class ChatterboxTTSBackend:
             language: BCP-47 language code
             seed: Random seed for reproducibility
             instruct: Unused (protocol compatibility)
+            params: Optional overrides — exaggeration, cfg_weight,
+                temperature, repetition_penalty, min_p, top_p
 
         Returns:
             Tuple of (audio_array, sample_rate)
         """
+        from . import clamp_params
+
         await self.load_model()
 
         ref_audio = voice_prompt.get("ref_audio")
@@ -192,8 +207,9 @@ class ChatterboxTTSBackend:
             logger.warning(f"Reference audio not found: {ref_audio}")
             ref_audio = None
 
-        # Merge language-specific defaults with global defaults
+        # Language-tuned defaults, overridden by sanitized caller params
         lang_defaults = self._LANG_DEFAULTS.get(language, self._GLOBAL_DEFAULTS)
+        gen_opts = clamp_params(params, self._PARAM_SPEC, base=lang_defaults)
 
         def _generate_sync():
             import torch
@@ -201,16 +217,13 @@ class ChatterboxTTSBackend:
             if seed is not None:
                 manual_seed(seed, self._device)
 
-            logger.info(f"[Chatterbox] Generating: lang={language}")
+            logger.info(f"[Chatterbox] Generating: lang={language} opts={gen_opts}")
 
             wav = self.model.generate(
                 text,
                 language_id=language,
                 audio_prompt_path=ref_audio,
-                exaggeration=lang_defaults["exaggeration"],
-                cfg_weight=lang_defaults["cfg_weight"],
-                temperature=lang_defaults["temperature"],
-                repetition_penalty=lang_defaults["repetition_penalty"],
+                **gen_opts,
             )
 
             # Convert tensor -> numpy

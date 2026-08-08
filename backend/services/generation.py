@@ -42,6 +42,8 @@ async def run_generation(
     max_chunk_chars: Optional[int] = None,
     crossfade_ms: Optional[int] = None,
     version_id: Optional[str] = None,
+    params: Optional[dict] = None,
+    verify: bool = False,
 ) -> None:
     """Execute TTS inference and persist the result.
 
@@ -78,6 +80,8 @@ async def run_generation(
             seed=seed if mode != "regenerate" else None,
             instruct=instruct,
             trim_fn=trim_fn,
+            params=params,
+            verify=verify,
         )
         if max_chunk_chars is not None:
             gen_kwargs["max_chunk_chars"] = max_chunk_chars
@@ -88,7 +92,7 @@ async def run_generation(
 
         # --- Normalize (generate and regenerate always; retry skips) -----
         if normalize or mode == "regenerate":
-            audio = normalize_audio(audio)
+            audio = normalize_audio(audio, sample_rate=sample_rate)
 
         duration = len(audio) / sample_rate
 
@@ -304,7 +308,7 @@ async def generate_audio_sync(
     )
 
     if normalize:
-        audio = normalize_audio(audio)
+        audio = normalize_audio(audio, sample_rate=sample_rate)
 
     return tts.audio_to_wav_bytes(audio, sample_rate)
 

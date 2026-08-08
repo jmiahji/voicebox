@@ -280,6 +280,24 @@ class HumeTadaBackend:
     ) -> Tuple[np.ndarray, str]:
         return await _combine_voice_prompts(audio_paths, reference_texts, sample_rate=24000)
 
+    # Caller-overridable InferenceOptions fields, clamped to safe ranges.
+    # TADA's 1:1 text↔audio alignment makes it structurally immune to
+    # double-reads — with candidates + a scorer it self-selects the best take.
+    _PARAM_SPEC = {
+        "text_temperature": (0.05, 2.0, float),
+        "text_top_p": (0.1, 1.0, float),
+        "text_repetition_penalty": (1.0, 3.0, float),
+        "acoustic_cfg_scale": (0.5, 5.0, float),
+        "duration_cfg_scale": (0.5, 5.0, float),
+        "noise_temperature": (0.1, 2.0, float),
+        "num_flow_matching_steps": (4, 32, int),
+        "num_acoustic_candidates": (1, 8, int),
+        "spkr_verification_weight": (0.0, 5.0, float),
+        "speed_up_factor": (0.5, 2.0, float),
+        "scorer": (None, None, str),
+    }
+    _VALID_SCORERS = {"spkr_verification", "likelihood", "duration_median"}
+
     async def generate(
         self,
         text: str,
@@ -287,6 +305,7 @@ class HumeTadaBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio from text using HumeAI TADA.
@@ -297,10 +316,19 @@ class HumeTadaBackend:
             language: Language code (en, ar, de, es, fr, it, ja, pl, pt, zh)
             seed: Random seed for reproducibility
             instruct: Not supported by TADA (ignored)
+            params: Optional InferenceOptions overrides — sampling temps,
+                CFG scales, flow-matching steps, num_acoustic_candidates +
+                scorer (native best-of-N with automatic pick), speed_up_factor
 
         Returns:
             Tuple of (audio_array, sample_rate=24000)
         """
+        from . import clamp_params
+
+        opt_overrides = clamp_params(params, self._PARAM_SPEC)
+        if opt_overrides.get("scorer") not in self._VALID_SCORERS:
+            opt_overrides.pop("scorer", None)
+
         await self.load_model(self.model_size)
 
         def _generate_sync():
@@ -334,11 +362,20 @@ class HumeTadaBackend:
             # the language is already baked in. For simplicity, we don't
             # reload the encoder here.
 
-            logger.info(f"[TADA] Generating ({language}), text length: {len(text)}")
+            logger.info(
+                f"[TADA] Generating ({language}), text length: {len(text)}, opts={opt_overrides}"
+            )
+
+            gen_kwargs = {}
+            if opt_overrides:
+                from tada.modules.tada import InferenceOptions
+
+                gen_kwargs["inference_options"] = InferenceOptions(**opt_overrides)
 
             output = self.model.generate(
                 prompt=prompt,
                 text=text,
+                **gen_kwargs,
             )
 
             # output.audio is a list of tensors (one per batch item)

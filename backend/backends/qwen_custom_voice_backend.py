@@ -159,6 +159,15 @@ class QwenCustomVoiceBackend:
     ) -> tuple[np.ndarray, str]:
         return await _combine_voice_prompts(audio_paths, reference_texts)
 
+    # Caller-overridable HF-generate sampling params, clamped to safe ranges.
+    _PARAM_SPEC = {
+        "temperature": (0.05, 2.0, float),
+        "top_k": (1, 500, int),
+        "top_p": (0.1, 1.0, float),
+        "repetition_penalty": (1.0, 3.0, float),
+        "max_new_tokens": (256, 8192, int),
+    }
+
     async def generate(
         self,
         text: str,
@@ -166,6 +175,7 @@ class QwenCustomVoiceBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> tuple[np.ndarray, int]:
         """
         Generate audio using Qwen CustomVoice.
@@ -177,13 +187,18 @@ class QwenCustomVoiceBackend:
             seed: Random seed for reproducibility
             instruct: Natural language instruction for style control
                       (e.g. "Speak in an angry tone", "Very happy")
+            params: Optional sampling overrides (temperature, top_k, top_p,
+                repetition_penalty, max_new_tokens)
 
         Returns:
             Tuple of (audio_array, sample_rate)
         """
+        from . import clamp_params
+
         await self.load_model_async(None)
 
         speaker = voice_prompt.get("preset_voice_id") or QWEN_CV_DEFAULT_SPEAKER
+        gen_opts = clamp_params(params, self._PARAM_SPEC)
 
         def _generate_sync():
             if seed is not None:
@@ -202,6 +217,8 @@ class QwenCustomVoiceBackend:
             # Only pass instruct if non-empty
             if instruct:
                 kwargs["instruct"] = instruct
+
+            kwargs.update(gen_opts)
 
             # Inference runs with the process's default HF_HUB_OFFLINE
             # state. Forcing offline here (issue #462) regressed online

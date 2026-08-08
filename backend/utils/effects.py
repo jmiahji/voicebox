@@ -29,7 +29,12 @@ from pedalboard import (
     Compressor,
     Gain,
     HighpassFilter,
+    HighShelfFilter,
+    Limiter,
     LowpassFilter,
+    LowShelfFilter,
+    NoiseGate,
+    PeakFilter,
     Delay,
     PitchShift,
 )
@@ -37,6 +42,56 @@ from pedalboard import (
 
 # Each param definition: (default, min, max, description)
 EFFECT_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "limiter": {
+        "cls": Limiter,
+        "label": "Limiter",
+        "description": "True peak limiter — transparent loudness ceiling (use instead of hard clipping).",
+        "params": {
+            "threshold_db": {"default": -1.0, "min": -24.0, "max": 0.0, "step": 0.1, "description": "Ceiling (dB)"},
+            "release_ms": {"default": 100.0, "min": 1.0, "max": 1000.0, "step": 1.0, "description": "Release (ms)"},
+        },
+    },
+    "noise_gate": {
+        "cls": NoiseGate,
+        "label": "Noise Gate",
+        "description": "Silences the floor between phrases — removes hiss and room tone from pauses.",
+        "params": {
+            "threshold_db": {"default": -60.0, "min": -100.0, "max": 0.0, "step": 1.0, "description": "Open threshold (dB)"},
+            "ratio": {"default": 10.0, "min": 1.0, "max": 100.0, "step": 0.5, "description": "Reduction ratio"},
+            "attack_ms": {"default": 1.0, "min": 0.1, "max": 100.0, "step": 0.1, "description": "Attack (ms)"},
+            "release_ms": {"default": 100.0, "min": 1.0, "max": 1000.0, "step": 1.0, "description": "Release (ms)"},
+        },
+    },
+    "low_shelf": {
+        "cls": LowShelfFilter,
+        "label": "Low Shelf EQ",
+        "description": "Boost or cut everything below the cutoff — body/mud control (cut 2–4 dB around 250 Hz to de-mud dialogue).",
+        "params": {
+            "cutoff_frequency_hz": {"default": 250.0, "min": 20.0, "max": 2000.0, "step": 1.0, "description": "Cutoff (Hz)"},
+            "gain_db": {"default": 0.0, "min": -18.0, "max": 18.0, "step": 0.1, "description": "Gain (dB)"},
+            "q": {"default": 0.707, "min": 0.1, "max": 10.0, "step": 0.01, "description": "Q"},
+        },
+    },
+    "high_shelf": {
+        "cls": HighShelfFilter,
+        "label": "High Shelf EQ",
+        "description": "Boost or cut everything above the cutoff — air/sibilance control (gentle +1–3 dB at 8 kHz adds presence).",
+        "params": {
+            "cutoff_frequency_hz": {"default": 8000.0, "min": 1000.0, "max": 16000.0, "step": 10.0, "description": "Cutoff (Hz)"},
+            "gain_db": {"default": 0.0, "min": -18.0, "max": 18.0, "step": 0.1, "description": "Gain (dB)"},
+            "q": {"default": 0.707, "min": 0.1, "max": 10.0, "step": 0.01, "description": "Q"},
+        },
+    },
+    "peak_eq": {
+        "cls": PeakFilter,
+        "label": "Peak EQ",
+        "description": "Parametric bell — surgical boost/cut at one frequency (presence lift 2–5 kHz, harshness cut 3–4 kHz).",
+        "params": {
+            "cutoff_frequency_hz": {"default": 3000.0, "min": 50.0, "max": 16000.0, "step": 10.0, "description": "Centre (Hz)"},
+            "gain_db": {"default": 0.0, "min": -18.0, "max": 18.0, "step": 0.1, "description": "Gain (dB)"},
+            "q": {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01, "description": "Q"},
+        },
+    },
     "chorus": {
         "cls": Chorus,
         "label": "Chorus / Flanger",

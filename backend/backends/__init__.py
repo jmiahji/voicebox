@@ -23,6 +23,36 @@ DEFAULT_LLM_TEMPERATURE = 0.7
 
 from ..utils.platform_detect import get_backend_type
 
+
+def clamp_params(
+    params: Optional[dict],
+    spec: dict,
+    base: Optional[dict] = None,
+) -> dict:
+    """Merge caller-supplied generation params over ``base`` defaults.
+
+    Only keys present in ``spec`` survive, cast and clamped to their range:
+    ``spec = {key: (lo, hi, cast)}``. ``lo`` of None skips clamping (bools).
+    Unknown keys and uncastable values are ignored — API callers can never
+    push a backend outside its safe envelope.
+    """
+    out = dict(base or {})
+    if not params:
+        return out
+    for key, (lo, hi, cast) in spec.items():
+        if key not in params:
+            continue
+        try:
+            val = cast(params[key])
+        except (TypeError, ValueError):
+            continue
+        if lo is None or isinstance(val, bool):
+            out[key] = val
+        else:
+            out[key] = min(hi, max(lo, val))
+    return out
+
+
 LANGUAGE_CODE_TO_NAME = {
     "zh": "chinese",
     "en": "english",
@@ -105,9 +135,14 @@ class TTSBackend(Protocol):
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio from text.
+
+        ``params`` carries optional per-engine expressiveness overrides
+        (exaggeration, cfg_weight, temperature, speed, ...). Each backend
+        sanitizes with ``clamp_params`` and ignores what it can't use.
 
         Returns:
             Tuple of (audio_array, sample_rate)
@@ -210,6 +245,7 @@ _llm_backends_lock = threading.Lock()
 TTS_ENGINES = {
     "qwen": "Qwen TTS",
     "qwen_custom_voice": "Qwen CustomVoice",
+    "qwen_voice_design": "Qwen VoiceDesign",
     "luxtts": "LuxTTS",
     "chatterbox": "Chatterbox TTS",
     "chatterbox_turbo": "Chatterbox Turbo",
@@ -276,6 +312,22 @@ def _get_qwen_custom_voice_configs() -> list[ModelConfig]:
             hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
             model_size="0.6B",
             size_mb=1200,
+            supports_instruct=True,
+            languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+        ),
+    ]
+
+
+def _get_qwen_voice_design_configs() -> list[ModelConfig]:
+    """Return Qwen VoiceDesign model configs (voice-from-description)."""
+    return [
+        ModelConfig(
+            model_name="qwen-voice-design-1.7B",
+            display_name="Qwen VoiceDesign 1.7B",
+            engine="qwen_voice_design",
+            hf_repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+            model_size="1.7B",
+            size_mb=3500,
             supports_instruct=True,
             languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
         ),
@@ -464,6 +516,7 @@ def get_all_model_configs() -> list[ModelConfig]:
     return (
         _get_qwen_model_configs()
         + _get_qwen_custom_voice_configs()
+        + _get_qwen_voice_design_configs()
         + _get_non_qwen_tts_configs()
         + _get_whisper_configs()
         + _get_qwen_llm_configs()
@@ -472,7 +525,7 @@ def get_all_model_configs() -> list[ModelConfig]:
 
 def get_tts_model_configs() -> list[ModelConfig]:
     """Return only TTS model configs."""
-    return _get_qwen_model_configs() + _get_qwen_custom_voice_configs() + _get_non_qwen_tts_configs()
+    return _get_qwen_model_configs() + _get_qwen_custom_voice_configs() + _get_qwen_voice_design_configs() + _get_non_qwen_tts_configs()
 
 
 def get_llm_model_configs() -> list[ModelConfig]:
@@ -696,6 +749,10 @@ def get_tts_backend_for_engine(engine: str) -> TTSBackend:
             from .chatterbox_turbo_backend import ChatterboxTurboTTSBackend
 
             backend = ChatterboxTurboTTSBackend()
+        elif engine == "qwen_voice_design":
+            from .qwen_voice_design_backend import QwenVoiceDesignBackend
+
+            backend = QwenVoiceDesignBackend()
         elif engine == "tada":
             from .hume_backend import HumeTadaBackend
 

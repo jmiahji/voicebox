@@ -241,6 +241,7 @@ class KokoroTTSBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> tuple[np.ndarray, int]:
         """
         Generate audio from text using Kokoro.
@@ -251,13 +252,17 @@ class KokoroTTSBackend:
             language: Language code
             seed: Random seed for reproducibility
             instruct: Not supported by Kokoro (ignored)
+            params: Optional overrides — speed (0.5–2.0)
 
         Returns:
             Tuple of (audio_array, sample_rate)
         """
+        from . import clamp_params
+
         await self.load_model()
 
         voice_name = voice_prompt.get("preset_voice_id") or voice_prompt.get("kokoro_voice") or KOKORO_DEFAULT_VOICE
+        gen_opts = clamp_params(params, {"speed": (0.5, 2.0, float)}, base={"speed": 1.0})
 
         def _generate_sync():
             import torch
@@ -271,7 +276,7 @@ class KokoroTTSBackend:
 
             # Generate all chunks and concatenate
             audio_chunks = []
-            for result in pipeline(text, voice=voice_name, speed=1.0):
+            for result in pipeline(text, voice=voice_name, speed=gen_opts["speed"]):
                 if result.audio is not None:
                     chunk = result.audio
                     if isinstance(chunk, torch.Tensor):

@@ -199,6 +199,15 @@ class PyTorchTTSBackend:
     ) -> Tuple[np.ndarray, str]:
         return await _combine_voice_prompts(audio_paths, reference_texts)
 
+    # Caller-overridable HF-generate sampling params, clamped to safe ranges.
+    _PARAM_SPEC = {
+        "temperature": (0.05, 2.0, float),
+        "top_k": (1, 500, int),
+        "top_p": (0.1, 1.0, float),
+        "repetition_penalty": (1.0, 3.0, float),
+        "max_new_tokens": (256, 8192, int),
+    }
+
     async def generate(
         self,
         text: str,
@@ -206,6 +215,7 @@ class PyTorchTTSBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio from text using voice prompt.
@@ -216,12 +226,23 @@ class PyTorchTTSBackend:
             language: Language code (en or zh)
             seed: Random seed for reproducibility
             instruct: Natural language instruction for speech delivery control
+            params: Optional sampling overrides (temperature, top_k, top_p,
+                repetition_penalty, max_new_tokens)
 
         Returns:
             Tuple of (audio_array, sample_rate)
         """
         # Load model
         await self.load_model_async(None)
+
+        from . import clamp_params
+
+        # repetition_penalty 1.5 default: qwen's ICL clone path is documented
+        # to degenerate (loops/gibberish) at the library default of 1.05 —
+        # mlx-audio's own ICL mode force-raises it to >=1.5 for this reason.
+        gen_opts = clamp_params(
+            params, self._PARAM_SPEC, base={"repetition_penalty": 1.5}
+        )
 
         def _generate_sync():
             """Run synchronous generation in thread pool."""
@@ -236,6 +257,7 @@ class PyTorchTTSBackend:
                 voice_clone_prompt=voice_prompt,
                 language=LANGUAGE_CODE_TO_NAME.get(language, "auto"),
                 instruct=instruct,
+                **gen_opts,
             )
             return wavs[0], sample_rate
 

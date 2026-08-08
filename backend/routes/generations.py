@@ -139,6 +139,8 @@ async def generate_speech(
             mode="generate",
             max_chunk_chars=data.max_chunk_chars,
             crossfade_ms=data.crossfade_ms,
+            params=data.params,
+            verify=data.verify,
         )
     )
 
@@ -352,6 +354,7 @@ async def stream_speech(
 
         trim_fn = trim_tts_output
 
+    verify_report: dict = {}
     audio, sample_rate = await generate_chunked(
         tts_model,
         data.text,
@@ -362,6 +365,9 @@ async def stream_speech(
         max_chunk_chars=data.max_chunk_chars,
         crossfade_ms=data.crossfade_ms,
         trim_fn=trim_fn,
+        params=data.params,
+        verify=data.verify,
+        report=verify_report,
     )
 
     effects_chain_config = None
@@ -383,7 +389,7 @@ async def stream_speech(
     if data.normalize:
         from ..utils.audio import normalize_audio
 
-        audio = normalize_audio(audio)
+        audio = normalize_audio(audio, sample_rate=sample_rate)
 
     wav_bytes = tts.audio_to_wav_bytes(audio, sample_rate)
 
@@ -395,10 +401,16 @@ async def stream_speech(
         except (BrokenPipeError, ConnectionResetError, asyncio.CancelledError):
             logger.debug("Client disconnected during audio stream")
 
+    stream_headers = {"Content-Disposition": 'attachment; filename="speech.wav"'}
+    if data.verify:
+        import json as _json
+
+        stream_headers["X-Voicebox-Verify"] = _json.dumps(verify_report)
+
     return StreamingResponse(
         _wav_stream(),
         media_type="audio/wav",
-        headers={"Content-Disposition": 'attachment; filename="speech.wav"'},
+        headers=stream_headers,
     )
 
 

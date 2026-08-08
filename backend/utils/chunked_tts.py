@@ -201,6 +201,154 @@ def concatenate_audio_chunks(
     return result
 
 
+# ── ASR round-trip verification ──────────────────────────────────────
+#
+# Autoregressive TTS fails by alignment drift: double-read sentences,
+# skipped words, invented words. An ASR round-trip (generate → transcribe →
+# compare against the source text) catches exactly this class; published
+# results show best-of-N with an ASR gate drives catastrophic failure from
+# ~27% to ~0% at N=4 (arXiv 2606.18323). The same technique powers
+# ElevenLabs Studio's Auto-Regenerate ("missing or additional words").
+
+VERIFY_WER_THRESHOLD = 0.35
+VERIFY_MAX_ATTEMPTS = 3  # 1 original + up to 2 retries
+_SEED_RETRY_STRIDE = 1009  # prime, far outside the per-chunk +i stride
+
+_WHISPER_LANGS = {"en", "zh", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"}
+
+
+def _normalize_for_wer(text: str) -> List[str]:
+    """Lowercase, strip [tags]/punctuation, drop digit-bearing tokens.
+
+    Digit tokens are dropped from BOTH sides because TTS normalizes numbers
+    ("20" → "twenty") — a legitimate read would otherwise count as an error.
+    """
+    text = re.sub(r"\[[^\]]*\]", " ", text.lower())
+    text = re.sub(r"[^\w\s']", " ", text)
+    return [w for w in text.split() if not any(ch.isdigit() for ch in w)]
+
+
+def _word_error_rate(ref: List[str], hyp: List[str]) -> float:
+    """Word-level Levenshtein distance over the reference length."""
+    if not ref:
+        return 0.0
+    prev = list(range(len(hyp) + 1))
+    for i, r in enumerate(ref, 1):
+        cur = [i] + [0] * len(hyp)
+        for j, h in enumerate(hyp, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != h))
+        prev = cur
+    return prev[-1] / len(ref)
+
+
+async def _transcribe_for_verify(
+    audio: np.ndarray, sample_rate: int, language: str
+) -> str | None:
+    """Whisper round-trip via the in-process STT backend.
+
+    Returns None when no Whisper model is cached — verification never
+    triggers a model download mid-generation.
+    """
+    from ..services import transcribe as transcribe_service
+
+    whisper = transcribe_service.get_whisper_model()
+    size = None
+    if whisper.is_loaded():
+        size = whisper.model_size
+    else:
+        for candidate in ("base", "small", "turbo", "medium", "large"):
+            try:
+                if whisper._is_model_cached(candidate):
+                    size = candidate
+                    break
+            except Exception:
+                continue
+    if size is None:
+        return None
+
+    import os
+    import tempfile
+
+    import soundfile as sf
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    try:
+        sf.write(tmp.name, np.asarray(audio, dtype=np.float32), sample_rate)
+        tmp.close()
+        lang = language if language in _WHISPER_LANGS else None
+        return await whisper.transcribe(tmp.name, lang, size)
+    except Exception as e:
+        logger.warning("Verify transcription failed (%s) — skipping check", e)
+        return None
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+async def _generate_chunk_verified(
+    backend,
+    chunk_text: str,
+    voice_prompt: dict,
+    language: str,
+    chunk_seed: int | None,
+    instruct: str | None,
+    params: dict | None,
+    trim_fn,
+    verify: bool,
+    report: dict | None,
+) -> Tuple[np.ndarray, int, float | None]:
+    """Generate one chunk, optionally ASR-verified with seed-reroll retries.
+
+    Returns (audio, sample_rate, wer) — wer is None when verification was
+    off or unavailable. On repeated failure the LOWEST-WER take is kept.
+    """
+    ref_words = _normalize_for_wer(chunk_text) if verify else []
+    attempts = VERIFY_MAX_ATTEMPTS if (verify and ref_words) else 1
+
+    best: tuple | None = None  # (wer, audio, sr)
+    for attempt in range(attempts):
+        seed_n = (
+            (chunk_seed + attempt * _SEED_RETRY_STRIDE)
+            if chunk_seed is not None
+            else None
+        )
+        audio, sr = await backend.generate(
+            chunk_text, voice_prompt, language, seed_n, instruct, params
+        )
+        if trim_fn is not None:
+            audio = trim_fn(audio, sr)
+
+        if attempts == 1:
+            return audio, sr, None
+
+        hyp_text = await _transcribe_for_verify(audio, sr, language)
+        if hyp_text is None:
+            # Whisper unavailable — verification is off for this request.
+            if report is not None:
+                report["available"] = False
+            return audio, sr, None
+
+        wer = _word_error_rate(ref_words, _normalize_for_wer(hyp_text))
+        if best is None or wer < best[0]:
+            best = (wer, audio, sr)
+        if wer <= VERIFY_WER_THRESHOLD:
+            break
+        if attempt < attempts - 1:
+            if report is not None:
+                report["retries"] = report.get("retries", 0) + 1
+            logger.info(
+                "Chunk failed verify (WER %.2f > %.2f) — retrying with rerolled seed. heard=%r",
+                wer,
+                VERIFY_WER_THRESHOLD,
+                (hyp_text or "")[:120],
+            )
+
+    assert best is not None
+    return best[1], best[2], best[0]
+
+
 async def generate_chunked(
     backend,
     text: str,
@@ -211,6 +359,9 @@ async def generate_chunked(
     max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
     crossfade_ms: int = 50,
     trim_fn=None,
+    params: dict | None = None,
+    verify: bool = False,
+    report: dict | None = None,
 ) -> Tuple[np.ndarray, int]:
     """Generate audio with automatic chunking for long text.
 
@@ -239,6 +390,15 @@ async def generate_chunked(
         Optional ``(audio, sample_rate) -> audio`` post-processing
         function applied to each chunk before concatenation (e.g.
         ``trim_tts_output`` for Chatterbox engines).
+    params : dict | None
+        Per-engine expressiveness/sampling overrides, forwarded to
+        ``backend.generate()`` (each backend sanitizes its own subset).
+    verify : bool
+        ASR round-trip verification per chunk (see module notes above).
+        Silently unavailable when no Whisper model is cached.
+    report : dict | None
+        Out-param: mutated with verification metadata —
+        ``{enabled, available, chunks, retries, worst_wer, passed}``.
 
     Returns
     -------
@@ -246,54 +406,66 @@ async def generate_chunked(
     """
     chunks = split_text_into_chunks(text, max_chunk_chars)
 
-    if len(chunks) <= 1:
-        # Short text — single-shot fast path
-        audio, sample_rate = await backend.generate(
-            text,
-            voice_prompt,
-            language,
-            seed,
-            instruct,
+    if report is not None:
+        report.update(
+            {
+                "enabled": bool(verify),
+                "available": bool(verify),
+                "chunks": len(chunks),
+                "retries": 0,
+                "worst_wer": None,
+                "passed": None,
+            }
         )
-        if trim_fn is not None:
-            audio = trim_fn(audio, sample_rate)
-        return audio, sample_rate
 
-    # Long text — chunked generation
-    logger.info(
-        "Splitting %d chars into %d chunks (max %d chars each)",
-        len(text),
-        len(chunks),
-        max_chunk_chars,
-    )
+    if len(chunks) > 1:
+        logger.info(
+            "Splitting %d chars into %d chunks (max %d chars each)",
+            len(text),
+            len(chunks),
+            max_chunk_chars,
+        )
+
     audio_chunks: List[np.ndarray] = []
     sample_rate: int | None = None
+    worst_wer: float | None = None
 
     for i, chunk_text in enumerate(chunks):
-        logger.info(
-            "Generating chunk %d/%d (%d chars)",
-            i + 1,
-            len(chunks),
-            len(chunk_text),
-        )
+        if len(chunks) > 1:
+            logger.info(
+                "Generating chunk %d/%d (%d chars)", i + 1, len(chunks), len(chunk_text)
+            )
         # Vary the seed per chunk to avoid correlated RNG artefacts,
         # but keep it deterministic so the same (text, seed) pair
         # always produces the same output.
         chunk_seed = (seed + i) if seed is not None else None
 
-        chunk_audio, chunk_sr = await backend.generate(
+        chunk_audio, chunk_sr, wer = await _generate_chunk_verified(
+            backend,
             chunk_text,
             voice_prompt,
             language,
             chunk_seed,
             instruct,
+            params,
+            trim_fn,
+            verify,
+            report,
         )
-        if trim_fn is not None:
-            chunk_audio = trim_fn(chunk_audio, chunk_sr)
+        if wer is not None:
+            worst_wer = wer if worst_wer is None else max(worst_wer, wer)
 
         audio_chunks.append(np.asarray(chunk_audio, dtype=np.float32))
         if sample_rate is None:
             sample_rate = chunk_sr
+
+    if report is not None:
+        report["worst_wer"] = round(worst_wer, 3) if worst_wer is not None else None
+        if report["enabled"] and report["available"] and worst_wer is not None:
+            report["passed"] = worst_wer <= VERIFY_WER_THRESHOLD
+
+    if len(audio_chunks) == 1:
+        return audio_chunks[0], sample_rate
 
     audio = concatenate_audio_chunks(audio_chunks, sample_rate, crossfade_ms=crossfade_ms)
     return audio, sample_rate

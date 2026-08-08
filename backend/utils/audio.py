@@ -12,6 +12,7 @@ def normalize_audio(
     audio: np.ndarray,
     target_db: float = -20.0,
     peak_limit: float = 0.85,
+    sample_rate: int = 24000,
 ) -> np.ndarray:
     """
     Normalize audio to target loudness with peak limiting.
@@ -37,10 +38,19 @@ def normalize_audio(
     if rms > 0:
         gain = target_rms / rms
         audio = audio * gain
-    
-    # Peak limiting
-    audio = np.clip(audio, -peak_limit, peak_limit)
-    
+
+    # Peak limiting — a true limiter is transparent where np.clip distorts
+    # hot peaks. Falls back to clipping if pedalboard is unavailable.
+    try:
+        from pedalboard import Limiter, Pedalboard
+
+        threshold_db = 20 * np.log10(max(peak_limit, 1e-6))
+        board = Pedalboard([Limiter(threshold_db=threshold_db, release_ms=100.0)])
+        audio = board(audio.reshape(1, -1), sample_rate=sample_rate)[0]
+        audio = audio.astype(np.float32)
+    except Exception:
+        audio = np.clip(audio, -peak_limit, peak_limit)
+
     return audio
 
 

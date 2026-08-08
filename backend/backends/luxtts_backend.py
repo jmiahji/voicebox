@@ -147,6 +147,7 @@ class LuxTTSBackend:
         language: str = "en",
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
+        params: Optional[dict] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio from text using LuxTTS.
@@ -157,11 +158,26 @@ class LuxTTSBackend:
             language: Language code (LuxTTS is English-focused)
             seed: Random seed for reproducibility
             instruct: Not supported by LuxTTS (ignored)
+            params: Optional overrides — num_steps (quality vs speed),
+                guidance_scale, t_shift, speed
 
         Returns:
             Tuple of (audio_array, sample_rate)
         """
+        from . import clamp_params
+
         await self.load_model()
+
+        gen_opts = clamp_params(
+            params,
+            {
+                "num_steps": (2, 32, int),
+                "guidance_scale": (0.5, 10.0, float),
+                "t_shift": (0.05, 1.0, float),
+                "speed": (0.5, 2.0, float),
+            },
+            base={"num_steps": 4, "guidance_scale": 3.0, "t_shift": 0.5, "speed": 1.0},
+        )
 
         def _generate_sync():
             if seed is not None:
@@ -170,11 +186,8 @@ class LuxTTSBackend:
             wav = self.model.generate_speech(
                 text=text,
                 encode_dict=voice_prompt,
-                num_steps=4,
-                guidance_scale=3.0,
-                t_shift=0.5,
-                speed=1.0,
                 return_smooth=False,  # 48kHz output
+                **gen_opts,
             )
 
             # LuxTTS returns a tensor (may be on GPU/MPS), move to CPU first
