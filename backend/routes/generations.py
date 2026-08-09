@@ -405,7 +405,7 @@ async def stream_speech(
     if data.verify:
         import json as _json
 
-        stream_headers["X-Voicebox-Verify"] = _json.dumps(verify_report)
+        stream_headers["X-Audio-Verify"] = _json.dumps(verify_report)
 
     return StreamingResponse(
         _wav_stream(),
